@@ -1,0 +1,7 @@
+-- pg-embedding-gen-by-yhw extension metadata file
+comment = 'BGE-M3 Embedding Generation Extension for PostgreSQL'
+default_version = '0.1.0'
+relocatable = false
+superuser = true
+schema = public
+comment_on_extension = 'Provides SQL functions to generate text embeddings via BGE-M3 API and calculate vector similarity'
