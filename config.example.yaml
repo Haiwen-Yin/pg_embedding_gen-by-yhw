@@ -1,0 +1,49 @@
+# pg_embedding_gen - PostgreSQL Embedding Extension Configuration Template
+
+## Quick Setup
+
+1. Copy this file: `cp config.example.yaml config.yaml`
+2. Edit with your settings
+3. Deploy using `./scripts/deploy.sh --config config.yaml`
+
+## Model Templates
+
+### BGE-M3 (Recommended for local deployment)
+```yaml
+model:
+  name: "text-embedding-bge-m3"
+  api_url: "http://localhost:12345/v1/embeddings"
+  dimension: 1024
+  
+credentials: {}
+```
+
+### OpenAI text-embedding-ada-002
+```yaml
+model:
+  name: "text-embedding-ada-002"
+  api_url: "https://api.openai.com/v1/embeddings"
+  dimension: 1536
+  
+credentials:
+  openai_api_key: "your-api-key-here"
+  
+security:
+  allow_local_only: false  # Must be false for external APIs
+```
+
+### HuggingFace nomic-embed-text-v1.5
+```yaml
+model:
+  name: "sentence-transformers/nomic-embed-text-v1.5"
+  api_url: "http://localhost:8000/v1/embeddings"
+  dimension: 768
+  
+credentials: {}
+```
+
+## Security Considerations
+
+- For cloud providers (OpenAI, etc.): Set `allow_local_only: false`
+- For local models: Keep `allow_local_only: true`
+- Always use HTTPS for external APIs when possible

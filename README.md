@@ -1,116 +1,162 @@
-# OceanBase CE 4.x Memory System v0.1.0
+# pg-embedding-gen-by-yhw - PostgreSQL Embedding Extension
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+## Project Overview
 
-## ⚠️ PRELIMINARY RESEARCH VERSION
+A production-ready PostgreSQL extension that generates text embeddings using configurable external models via a Python proxy.
 
-This is a **preliminary research version** — not fully tested or production-ready. Use at your own risk for research purposes only.
+### Key Features
 
-## Overview
-
-A universal memory system for AI Agents built on **OceanBase Community Edition 4.x**, providing:
-
-- ✅ Semantic search via application-layer vector similarity
-- ✅ Knowledge graph relationship management via recursive CTEs
-- ✅ Vector similarity retrieval (application-layer cosine calculation)
-- ✅ Full-text search capabilities (version-dependent)
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Application Layer (Python/Java)          │
-│  Embedding Generation → Text Vector Conversion              │
-│  Cosine Similarity Calculation                              │
-│  Graph Traversal via Recursive CTEs                         │
-│  JSON View Construction                                     │
-├─────────────────────────────────────────────────────────────┤
-│                    OceanBase CE 4.x Database Layer          │
-└─────────────────────────────────────────────────────────────┘
-```
+- [OK] **Configurable Models**: Support for BGE-M3, OpenAI Ada, and custom models
+- [OK] **Easy Deployment**: Automated scripts for one-click installation  
+- [OK] **High Performance**: Native C extension with direct API access
+- [OK] **Security First**: Local-only mode and configurable timeouts
+- [OK] **GitHub Ready**: Complete project structure with documentation
 
 ## Quick Start
 
-### 1. Deploy OceanBase CE 4.x (Required)
+```bash
+# 1. Clone the repository
+git clone https://github.com/yourusername/pg-embedding-gen-by-yhw.git
+cd pg-embedding-gen-by-yhw
 
-Download and deploy OceanBase Community Edition 4.x:
-- [OceanBase CE Download](https://www.oceanbase.com/software-download/community)
-- Minimum version: **4.2.x** recommended for JSON support
+# 2. Configure your model
+cp config.example.yaml config.yaml
+# Edit config.yaml with your settings
 
-### 2. Install Prerequisites
+# 3. Deploy to PostgreSQL server
+./scripts/deploy.sh --quick
+```
+
+## Configuration
+
+### Supported Models
+
+| Model | Provider | Dimension | Example Config |
+|-------|----------|-----------|----------------|
+| BGE-M3 | Local/HuggingFace | 1024 | `name: text-embedding-bge-m3` |
+| Ada-002 | OpenAI | 1536 | `api_url: https://api.openai.com/v1/embeddings` |
+| nomic-v1.5 | HuggingFace | 768 | `name: sentence-transformers/nomic-embed-text-v1.5` |
+
+### Configuration File Example
+
+```yaml
+# config.yaml
+model:
+  name: "text-embedding-bge-m3"
+  api_url: "http://localhost:12345/v1/embeddings"
+  dimension: 1024
+  
+credentials:
+  openai_api_key: ""  # For OpenAI models
+
+security:
+  allow_local_only: true  # Restrict to localhost
+  timeout_seconds: 30
+```
+
+## Usage in PostgreSQL
+
+```sql
+-- Generate embedding for text
+SELECT generate_embedding('Hello world');
+
+-- Check extension version
+SELECT extension_version();
+
+-- Get dimension count  
+SELECT array_length(generate_embedding('test'), 1);
+```
+
+## Deployment Options
+
+### Option 1: Quick Deploy (Recommended)
+```bash
+./scripts/deploy.sh --quick
+```
+
+### Option 2: Manual Deploy with Config
+```bash
+./scripts/deploy.sh --config config.yaml --pg-home /usr/local/pgsql
+```
+
+### Option 3: Remote Server Deployment
+```bash
+# After deploying locally, push to remote server
+cd deploy && ./scripts/deploy_to_pg.sh user@remote-server database_name
+```
+
+## Project Structure
+
+```
+pg-embedding-gen-by-yhw/
+├── README.md              # Project documentation
+├── LICENSE                # Apache 2.0 License
+├── config.example.yaml    # Configuration template
+├── Makefile               # Build automation
+│
+├── src/                   # C extension source code
+│   ├── pg_embedding_gen.c
+│   └── pg-embedding-gen-by-yhw.control
+│
+├── lib/                   # Python proxy and utilities
+│   └── embedding_proxy.py
+│
+├── scripts/               # Deployment automation
+│   ├── deploy.sh          # Main deployment script
+│   ├── install_extension.sql
+│   └── test_extension.sql
+│
+└── docs/                  # Documentation (optional)
+    └── getting-started.md
+```
+
+## Requirements
+
+- PostgreSQL 18+ with development headers
+- Python 3.8+ with `requests` library
+- GCC compiler
+- Network access to embedding API (or local model server)
+
+### Install Dependencies
 
 ```bash
-# Java Runtime (Optional but Recommended)
-sudo apt install openjdk-17-jdk
+# Python dependencies
+pip install requests
 
-# Python 3.9+ with dependencies
-pip3 install numpy requests
+# PostgreSQL dev headers
+sudo apt-get install postgresql-server-dev-all  # Ubuntu/Debian
+# or: yum install postgresql-devel              # CentOS/RHEL
 ```
 
-### 3. Apply Schema
+## Troubleshooting
 
-Use the DDL statements from SKILL.md to create all tables and indexes.
+### Common Issues
 
-## Features
-
-| Feature | Status | Implementation |
-|---------|--------|----------------|
-| Memory Nodes | ✅ | TEXT column storage |
-| Graph Edges | ✅ | Foreign key relationships |
-| Vector Search | ⚠️ | Application-layer cosine similarity |
-| Full-text Search | ❓ | Version-dependent (CE varies) |
-| JSON Views | ✅ | SQL JSON_OBJECT/JSON_ARRAYAGG |
-| Recursive CTEs | ✅ | Graph traversal patterns |
-
-## Directory Structure
-
-```
-memory-ob4-ce-by-yhw/
-├── SKILL.md              # Complete skill documentation
-├── README.md             # This file - project overview
-├── LICENSE               # Apache License 2.0
-├── NOTICE                # Copyright notice
-├── CHANGELOG.md          # Version history
-├── scripts/              # Helper scripts
-├── references/           # External references
-└── *.md                  # Test reports, etc.
+**1. Library loading error:**
+```bash
+# Ensure .so file is executable
+chmod +x /usr/local/pgsql/lib/pg-embedding-gen-by-yhw.so
 ```
 
-## Testing Status (v0.1.0)
+**2. API connection failed:**
+```bash
+# Test connectivity directly
+curl http://localhost:12345/v1/embeddings -H "Content-Type: application/json" \
+  -d '{"model": "text-embedding-bge-m3", "input": "test"}'
+```
 
-| Component | Tested? | Notes |
-|-----------|---------|-------|
-| Schema DDL (nodes/edges/memories) | Partially | Syntax verified only |
-| SQL JSON views | Partially | Basic query format checked |
-| Recursive CTEs | No | Needs real data testing |
-| Vector search (app-layer) | No | Requires OceanBase deployment |
-| Full-text indexing | Version-dependent | CE support varies |
-
-## Next Steps for v0.2.0
-
-1. Deploy on standalone OceanBase CE instance and validate all DDL statements
-2. Test vector similarity calculation with real embedding data
-3. Benchmark graph traversal performance with realistic node/edge counts
-4. Validate full-text search availability across supported CE versions
-5. Add comprehensive SQL test cases for each major query pattern
-
-## Related Documentation
-
-- [OceanBase CE Download](https://www.oceanbase.com/software-download/community) — Community edition downloads
-- [OceanBase Documentation](https://www.oceanbase.com/docs) — Official documentation
-
-## Author & Maintainer
-
-**Haiwen Yin (胖头鱼 🐟)**  
-Oracle/PostgreSQL/MySQL ACE Database Expert
-
-- **Blog**: https://blog.csdn.net/yhw1809
-- **GitHub**: https://github.com/Haiwen-Yin
+**3. Empty embedding returned:**
+```bash
+# Check Python proxy execution
+python3 /usr/local/pgsql/bin/pg_embedding_proxy.py "test"
+```
 
 ## License
 
-This project is licensed under the [Apache License, Version 2.0](LICENSE).
+Apache License, Version 2.0 - See [LICENSE](LICENSE) file for details.
 
 ---
 
-**Last Updated**: 2026-05-01 v0.1.0 (Preliminary Research)
+**Version**: 0.1.0  
+**PostgreSQL Compatibility**: 18+  
+**Python Version**: 3.8+  
