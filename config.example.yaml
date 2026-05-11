@@ -1,49 +1,44 @@
-# pg_embedding_gen - PostgreSQL Embedding Extension Configuration Template
+# pg_embedding-gen Configuration File
 
-## Quick Setup
+# Default embedding model
+default_model: "openai-text-embedding-3-small"
 
-1. Copy this file: `cp config.example.yaml config.yaml`
-2. Edit with your settings
-3. Deploy using `./scripts/deploy.sh --config config.yaml`
+# OpenAI configuration
+openai:
+  api_key: "sk-you...here"
+  base_url: "https://api.openai.com/v1"
+  timeout: 30
+  max_retries: 3
 
-## Model Templates
+# Ollama configuration
+ollama:
+  base_url: "http://localhost:11434"
+  timeout: 60
+  max_retries: 3
 
-### BGE-M3 (Recommended for local deployment)
-```yaml
-model:
-  name: "text-embedding-bge-m3"
-  api_url: "http://localhost:12345/v1/embeddings"
-  dimension: 1024
+# Local model configuration (e.g., sentence-transformers)
+local:
+  model_path: "/path/to/model"
+  device: "cpu"
+  timeout: 60
+
+# General configuration
+general:
+  batch_size: 100
+  max_text_length: 8192
+  log_level: "INFO"
+  log_file: "/var/log/pg_embedding-gen.log"
   
-credentials: {}
-```
+# Cache configuration
+cache:
+  enabled: false
+  max_size: 1000
+  ttl: 3600
 
-### OpenAI text-embedding-ada-002
-```yaml
-model:
-  name: "text-embedding-ada-002"
-  api_url: "https://api.openai.com/v1/embeddings"
-  dimension: 1536
-  
-credentials:
-  openai_api_key: "your-api-key-here"
-  
-security:
-  allow_local_only: false  # Must be false for external APIs
-```
-
-### HuggingFace nomic-embed-text-v1.5
-```yaml
-model:
-  name: "sentence-transformers/nomic-embed-text-v1.5"
-  api_url: "http://localhost:8000/v1/embeddings"
-  dimension: 768
-  
-credentials: {}
-```
-
-## Security Considerations
-
-- For cloud providers (OpenAI, etc.): Set `allow_local_only: false`
-- For local models: Keep `allow_local_only: true`
-- Always use HTTPS for external APIs when possible
+# Vector dimensions (for validation)
+vector_dimensions:
+  openai-text-embedding-3-small: 1536
+  openai-text-embedding-3-large: 3072
+  ollama-nomic-embed-text: 768
+  ollama-all-minilm: 384
+  ollama-mxbai-embed-large: 1024

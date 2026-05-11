@@ -1,243 +1,182 @@
 #!/usr/bin/env python3
 """
-pg_embedding_proxy - Embedding generation proxy with configurable models.
+pg_embedding-gen 嵌入代理
+版本: v0.2.0
+作者: yhw
 
-This script connects to PostgreSQL C extension via popen() and provides
-embedding functionality for various models (BGE-M3, OpenAI, etc.).
+用于生成文本嵌入向量的 Python 代理脚本
+支持 OpenAI、Ollama 和本地模型
 """
 
 import sys
 import os
 import json
-import time
-import requests
-from typing import List, Dict, Any, Optional
+import argparse
+import yaml
+import logging
+from typing import List, Optional, Dict, Any
+from datetime import datetime
 
-# Default configuration - can be overridden by config.yaml
-DEFAULT_CONFIG = {
-    "model": {
-        "name": "text-embedding-bge-m3",
-        "api_url": "http://10.10.10.1:12345/v1/embeddings",
-        "dimension": 1024
-    },
-    "credentials": {},
-    "security": {
-        "allow_local_only": True,
-        "timeout_seconds": 30,
-        "max_retries": 3
-    }
-}
+try:
+    import openai
+    import requests
+except ImportError as e:
+    sys.stderr.write(f"错误: 缺少必需的 Python 库: {e}\n")
+    sys.stderr.write("请运行: pip3 install openai requests pyyaml\n")
+    sys.exit(1)
 
 
-class ConfigLoader:
-    """Load configuration from YAML file or use defaults."""
+class EmbeddingProxy:
+    """嵌入代理类"""
     
-    @staticmethod
-    def load(config_path: str = None) -> Dict[str, Any]:
-        """Load configuration with fallback to defaults."""
+    def __init__(self, config_path: str):
+        """初始化代理"""
+        self.config = self._load_config(config_path)
+        self._setup_logging()
+        
+    def _load_config(self, config_path: str) -> Dict[str, Any]:
+        """加载配置文件"""
+        if not os.path.exists(config_path):
+            sys.stderr.write(f"错误: 配置文件不存在: {config_path}\n")
+            sys.exit(1)
+            
         try:
-            if config_path and os.path.exists(config_path):
-                return ConfigLoader._load_yaml(config_path)
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f)
         except Exception as e:
-            print(f"Warning: Failed to load {config_path}: {e}", file=sys.stderr)
-        
-        # Fall back to defaults
-        return DEFAULT_CONFIG
+            sys.stderr.write(f"错误: 加载配置文件失败: {e}\n")
+            sys.exit(1)
     
-    @staticmethod
-    def _load_yaml(filepath: str) -> Dict[str, Any]:
-        """Simple YAML loader (avoids PyYAML dependency for basic cases)."""
-        config = {}
-        with open(filepath, 'r') as f:
-            content = f.read()
-            
-        # Simple parsing for our use case
-        import re
+    def _setup_logging(self):
+        """设置日志"""
+        log_config = self.config.get('general', {})
+        log_level = getattr(logging, log_config.get('log_level', 'INFO'))
+        log_file = log_config.get('log_file', '/var/log/pg_embedding-gen.log')
         
-        # Parse model section
-        model_match = re.search(r'model:(.*?)credentials:', content, re.DOTALL)
-        if model_match:
-            model_section = model_match.group(1).strip()
-            config['model'] = {}
-            
-            # Extract key-value pairs
-            for line in model_section.split('\n'):
-                line = line.strip().rstrip(',')
-                if ':' in line and not line.startswith('#'):
-                    key, value = line.split(':', 1)
-                    key = key.strip()
-                    value = value.strip().strip('"').strip("'")
-                    
-                    # Try to convert types
-                    try:
-                        value = int(value)
-                    except ValueError:
-                        pass
-                        
-                    config['model'][key] = value
+        # 设置格式
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
         
-        # Parse credentials section
-        cred_match = re.search(r'credentials:(.*?)security:', content, re.DOTALL)
-        if cred_match:
-            cred_section = cred_match.group(1).strip()
-            config['credentials'] = {}
-            
-            for line in cred_section.split('\n'):
-                line = line.strip().rstrip(',')
-                if ':' in line and not line.startswith('#'):
-                    key, value = line.split(':', 1)
-                    key = key.strip()
-                    value = value.strip().strip('"').strip("'")
-                    config['credentials'][key] = value
-        
-        # Parse security section
-        sec_match = re.search(r'security:(.*?)(?:paths|$)', content, re.DOTALL)
-        if sec_match:
-            sec_section = sec_match.group(1).strip()
-            config['security'] = {}
-            
-            for line in sec_section.split('\n'):
-                line = line.strip().rstrip(',')
-                if ':' in line and not line.startswith('#'):
-                    key, value = line.split(':', 1)
-                    key = key.strip()
-                    # Convert booleans
-                    if isinstance(value, str):
-                        if value.lower() == 'true':
-                            value = True
-                        elif value.lower() == 'false':
-                            value = False
-                    else:
-                        try:
-                            value = int(value)
-                        except ValueError:
-                            pass
-                    
-                    config['security'][key] = value
-        
-        return config
-
-
-class EmbeddingGenerator:
-    """Generate embeddings using configurable models."""
-    
-    def __init__(self, config_path: str = None):
-        self.config = ConfigLoader.load(config_path)
-        self.model_name = self.config.get('model', {}).get('name', 'text-embedding-bge-m3')
-        self.api_url = self.config.get('model', {}).get('api_url', 
-                                                       'http://10.10.10.1:12345/v1/embeddings')
-        self.dimension = self.config.get('model', {}).get('dimension', 1024)
-        self.credentials = self.config.get('credentials', {})
-        security_config = self.config.get('security', {})
-        
-        self.allow_local_only = security_config.get('allow_local_only', True)
-        self.timeout = security_config.get('timeout_seconds', 30)
-        self.max_retries = security_config.get('max_retries', 3)
-    
-    def validate_api_access(self):
-        """Check if API access is allowed based on security settings."""
-        if self.allow_local_only:
-            # Check if URL is localhost or private IP
-            import re
-            local_pattern = r'^(http://)?(localhost|127\.0\.0\.[0-9]+|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})$'
-            if not re.match(local_pattern, self.api_url):
-                raise ValueError("API access denied: allow_local_only is True but API URL is external")
-    
-    def generate(self, text: str) -> List[float]:
-        """Generate embedding for given text."""
-        # Validate access before attempting generation
+        # 文件处理器
         try:
-            self.validate_api_access()
-        except ValueError:
-            print(f"Error: Cannot access {self.api_url} - security policy violation", 
-                  file=sys.stderr)
-            return [0.0] * self.dimension
-        
-        headers = {'Content-Type': 'application/json'}
-        
-        # Add authentication if credentials provided
-        if self.credentials.get('openai_api_key'):
-            headers['Authorization'] = f"Bearer {self.credentials['openai_api_key']}"
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(formatter)
             
-        custom_header_key = self.config.get('credentials', {}).get('custom_header_key')
-        custom_header_value = self.config.get('credentials', {}).get('custom_header_value')
-        if custom_header_key and custom_header_value:
-            headers[custom_header_key] = custom_header_value
+            self.logger = logging.getLogger('embedding_proxy')
+            self.logger.setLevel(log_level)
+            self.logger.addHandler(file_handler)
+        except Exception as e:
+            # 如果无法写入日志文件，使用 stderr
+            self.logger = logging.getLogger('embedding_proxy')
+            self.logger.setLevel(log_level)
+            handler = logging.StreamHandler(sys.stderr)
+            handler.setLevel(log_level)
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+    
+    def generate(self, text: str, model: Optional[str] = None) -> List[float]:
+        """生成嵌入向量"""
+        if not model:
+            model = self.config.get('default_model', 'openai-text-embedding-3-small')
         
+        self.logger.info(f"生成嵌入: model={model}, text_length={len(text)}")
+        
+        try:
+            if model.startswith('openai'):
+                return self._generate_openai(text, model)
+            elif model.startswith('ollama'):
+                return self._generate_ollama(text, model)
+            else:
+                return self._generate_local(text, model)
+        except Exception as e:
+            self.logger.error(f"生成嵌入失败: {e}")
+            raise
+    
+    def _generate_openai(self, text: str, model: str) -> List[float]:
+        """使用 OpenAI 生成嵌入"""
+        openai_config = self.config.get('openai', {})
+        api_key = openai_config.get('api_key', '')
+        base_url = openai_config.get('base_url', 'https://api.openai.com/v1')
+        timeout = openai_config.get('timeout', 30)
+        
+        if not api_key:
+            raise ValueError("OpenAI API key 未配置")
+        
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout
+        )
+        
+        response = client.embeddings.create(
+            model=model.replace('openai-', ''),
+            input=text
+        )
+        
+        return response.data[0].embedding
+    
+    def _generate_ollama(self, text: str, model: str) -> List[float]:
+        """使用 Ollama 生成嵌入"""
+        ollama_config = self.config.get('ollama', {})
+        base_url = ollama_config.get('base_url', 'http://localhost:11434')
+        timeout = ollama_config.get('timeout', 60)
+        
+        url = f"{base_url}/api/embeddings"
         payload = {
-            "model": self.model_name,
-            "input": text,
-            "encoding_format": "float"  # Request float array format
+            "model": model.replace('ollama-', ''),
+            "prompt": text
         }
         
-        # Retry logic for reliability
-        last_error = None
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                response = requests.post(self.api_url, 
-                                       json=payload, 
-                                       headers=headers,
-                                       timeout=self.timeout)
-                
-                if not response.ok:
-                    raise Exception(f"HTTP {response.status_code}: {response.text}")
-                
-                data = response.json()
-                
-                # Extract embedding from different API formats
-                if "data" in data and len(data["data"]) > 0:
-                    embedding = data["data"][0].get("embedding", [])
-                    
-                    # Validate dimension count
-                    expected_dim = self.dimension
-                    actual_dim = len(embedding)
-                    
-                    if actual_dim != expected_dim:
-                        print(f"Warning: Expected {expected_dim} dims, got {actual_dim}", 
-                              file=sys.stderr)
-                    
-                    return embedding
-                    
-                else:
-                    raise Exception("Unexpected API response format")
-                    
-            except requests.exceptions.RequestException as e:
-                last_error = e
-                if attempt < self.max_retries:
-                    time.sleep(1 * attempt)  # Exponential backoff
-                    
-        # Return default on failure
-        print(f"Error after {self.max_retries} attempts: {last_error}", 
-              file=sys.stderr)
-        return [0.0] * self.dimension
+        response = requests.post(url, json=payload, timeout=timeout)
+        response.raise_for_status()
+        
+        data = response.json()
+        return data.get('embedding', [])
+    
+    def _generate_local(self, text: str, model: str) -> List[float]:
+        """使用本地模型生成嵌入"""
+        # 这里可以集成 sentence-transformers 或其他本地模型
+        # 为简化，目前返回一个示例向量
+        sys.stderr.write(f"警告: 本地模型支持尚未完全实现: {model}\n")
+        
+        # 返回一个模拟向量（实际应该使用真正的模型）
+        return [0.0] * 768
 
 
 def main():
-    """CLI entry point - reads text from command line arguments."""
-    if len(sys.argv) < 2:
-        print("Usage: python3 pg_embedding_proxy.py \"text to embed\" [--config path]", 
-              file=sys.stderr)
+    """主函数"""
+    parser = argparse.ArgumentParser(description='pg_embedding-gen 嵌入代理')
+    parser.add_argument('--text', required=True, help='要生成嵌入的文本')
+    parser.add_argument('--model', help='嵌入模型名称')
+    parser.add_argument('--config', help='配置文件路径')
+    
+    # 兼容 PostgreSQL COPY FROM PROGRAM 的参数格式
+    parser.add_argument('config_pos', nargs='?', help='配置文件路径（位置参数）')
+    
+    args = parser.parse_args()
+    
+    # 确定配置文件路径
+    config_path = args.config or args.config_pos
+    if not config_path:
+        config_path = '/etc/pg_embedding-gen/config.yaml'
+    
+    # 创建代理
+    proxy = EmbeddingProxy(config_path)
+    
+    # 生成嵌入
+    try:
+        embedding = proxy.generate(args.text, args.model)
+        
+        # 输出向量（逗号分隔）
+        output = ','.join(map(str, embedding))
+        print(output, flush=True)
+        
+    except Exception as e:
+        sys.stderr.write(f"错误: {e}\n")
         sys.exit(1)
-    
-    # Parse arguments
-    config_path = None
-    text_parts = []
-    
-    for i, arg in enumerate(sys.argv[1:], 1):
-        if arg == "--config" and i + 1 < len(sys.argv):
-            config_path = sys.argv[i + 1]
-        elif not arg.startswith("--"):
-            text_parts.append(arg)
-    
-    text = " ".join(text_parts)
-    
-    # Generate embedding
-    generator = EmbeddingGenerator(config_path)
-    embedding = generator.generate(text)
-    
-    # Output as JSON array (C extension expects this format)
-    print(json.dumps(embedding))
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

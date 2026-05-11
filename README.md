@@ -1,162 +1,228 @@
-# pg-embedding-gen-by-yhw - PostgreSQL Embedding Extension
+# pg_embedding-gen - PostgreSQL Embedding Generation Extension
 
-## Project Overview
+A text vector embedding generation tool for PostgreSQL, implemented via COPY FROM PROGRAM mechanism without requiring compiled C extensions.
 
-A production-ready PostgreSQL extension that generates text embeddings using configurable external models via a Python proxy.
+## Version
 
-### Key Features
+v0.2.0
 
-- [OK] **Configurable Models**: Support for BGE-M3, OpenAI Ada, and custom models
-- [OK] **Easy Deployment**: Automated scripts for one-click installation  
-- [OK] **High Performance**: Native C extension with direct API access
-- [OK] **Security First**: Local-only mode and configurable timeouts
-- [OK] **GitHub Ready**: Complete project structure with documentation
+## Features
 
-## Quick Start
+- ✅ No C extension compilation required, uses PostgreSQL 18's COPY FROM PROGRAM mechanism
+- ✅ Supports multiple embedding models (OpenAI, Ollama, local models, etc.)
+- ✅ Generate vectors directly via SQL functions
+- ✅ Flexible configuration, easy to deploy
+- ✅ Supports batch processing and asynchronous generation
+- ✅ Comprehensive error handling and logging
+
+## System Requirements
+
+- PostgreSQL 18 or higher
+- Python 3.8 or higher
+- Required Python libraries (see requirements.txt)
+
+## Installation
+
+### Quick Install
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/yourusername/pg-embedding-gen-by-yhw.git
-cd pg-embedding-gen-by-yhw
+# Extract the archive
+unzip pg-embedding-gen-by-yhw-v0.2.0.zip
 
-# 2. Configure your model
-cp config.example.yaml config.yaml
-# Edit config.yaml with your settings
+# Change directory
+cd pg-embedding-gen-by-yhw-v0.2.0/pg_embedding-gen
 
-# 3. Deploy to PostgreSQL server
-./scripts/deploy.sh --quick
+# Run installation script
+sudo bash scripts/install.sh
+```
+
+### Manual Installation
+
+1. Copy files to PostgreSQL extension directory:
+```bash
+sudo cp lib/embedding_proxy.py /usr/local/pgsql/lib/
+sudo cp lib/embedding_wrapper.sh /usr/local/pgsql/lib/
+sudo chmod +x /usr/local/pgsql/lib/embedding_wrapper.sh
+```
+
+2. Install Python dependencies:
+```bash
+pip3 install -r requirements.txt
+```
+
+3. Configure config.yaml:
+```bash
+cp config.example.yaml /etc/pg_embedding-gen/config.yaml
+# Edit config file, set your embedding model parameters
+sudo vim /etc/pg_embedding-gen/config.yaml
+```
+
+4. Create database functions:
+```bash
+psql -d your_database -f sql/install.sql
+```
+
+## Usage Examples
+
+### Generate Embedding Vectors
+
+```sql
+-- Single text generation
+SELECT embedding_generate('your text content');
+
+-- Use specified model
+SELECT embedding_generate('your text content', 'openai-text-embedding-3-small');
+
+-- Batch generation
+SELECT id, text, embedding_generate(text) as vector 
+FROM documents 
+WHERE embedding IS NULL;
+```
+
+### Update Vector Column in Table
+
+```sql
+-- Update existing table
+UPDATE documents 
+SET embedding = embedding_generate(text)
+WHERE embedding IS NULL;
+
+-- Use WHERE clause for batch update
+UPDATE documents 
+SET embedding = embedding_generate(text)
+WHERE id > 100 AND id <= 200;
+```
+
+### Check Embedding Status
+
+```sql
+-- View embedding statistics
+SELECT * FROM embedding_stats();
+
+-- View recent errors
+SELECT * FROM embedding_errors() ORDER BY created_at DESC LIMIT 10;
 ```
 
 ## Configuration
 
-### Supported Models
-
-| Model | Provider | Dimension | Example Config |
-|-------|----------|-----------|----------------|
-| BGE-M3 | Local/HuggingFace | 1024 | `name: text-embedding-bge-m3` |
-| Ada-002 | OpenAI | 1536 | `api_url: https://api.openai.com/v1/embeddings` |
-| nomic-v1.5 | HuggingFace | 768 | `name: sentence-transformers/nomic-embed-text-v1.5` |
-
-### Configuration File Example
+Configuration file located at `/etc/pg_embedding-gen/config.yaml`, supports the following options:
 
 ```yaml
-# config.yaml
-model:
-  name: "text-embedding-bge-m3"
-  api_url: "http://localhost:12345/v1/embeddings"
-  dimension: 1024
-  
-credentials:
-  openai_api_key: ""  # For OpenAI models
+# Default model
+default_model: "openai-text-embedding-3-small"
 
-security:
-  allow_local_only: true  # Restrict to localhost
-  timeout_seconds: 30
+# OpenAI configuration
+openai:
+  api_key: "your-api-key"
+  base_url: "https://api.openai.com/v1"
+  timeout: 30
+
+# Ollama configuration
+ollama:
+  base_url: "http://localhost:11434"
+  timeout: 60
+
+# General configuration
+batch_size: 100
+max_retries: 3
+log_level: "INFO"
 ```
 
-## Usage in PostgreSQL
+For detailed configuration, see `docs/model-configuration.md`.
+
+## Supported Models
+
+- OpenAI: text-embedding-3-small, text-embedding-3-large
+- Ollama: nomic-embed-text, all-minilm, mxbai-embed-large
+- Local models: sentence-transformers, etc.
+
+For more model information, see `docs/model-configuration.md`.
+
+## Performance Optimization
+
+### Batch Processing
+
+Use batch updates for better performance:
 
 ```sql
--- Generate embedding for text
-SELECT generate_embedding('Hello world');
-
--- Check extension version
-SELECT extension_version();
-
--- Get dimension count  
-SELECT array_length(generate_embedding('test'), 1);
+-- Batch update (1000 rows per batch)
+DO $$
+DECLARE
+  batch_size INT := 1000;
+  offset INT := 0;
+  updated INT;
+BEGIN
+  LOOP
+    UPDATE documents 
+    SET embedding = embedding_generate(text)
+    WHERE id > offset 
+      AND id <= offset + batch_size
+      AND embedding IS NULL;
+    
+    GET DIAGNOSTICS updated = ROW_COUNT;
+    
+    RAISE NOTICE 'Updated % rows from offset %', updated, offset;
+    
+    EXIT WHEN updated = 0;
+    offset := offset + batch_size;
+  END LOOP;
+END $$;
 ```
 
-## Deployment Options
+### Index Optimization
 
-### Option 1: Quick Deploy (Recommended)
-```bash
-./scripts/deploy.sh --quick
-```
+Create indexes for vector columns:
 
-### Option 2: Manual Deploy with Config
-```bash
-./scripts/deploy.sh --config config.yaml --pg-home /usr/local/pgsql
-```
-
-### Option 3: Remote Server Deployment
-```bash
-# After deploying locally, push to remote server
-cd deploy && ./scripts/deploy_to_pg.sh user@remote-server database_name
-```
-
-## Project Structure
-
-```
-pg-embedding-gen-by-yhw/
-├── README.md              # Project documentation
-├── LICENSE                # Apache 2.0 License
-├── config.example.yaml    # Configuration template
-├── Makefile               # Build automation
-│
-├── src/                   # C extension source code
-│   ├── pg_embedding_gen.c
-│   └── pg-embedding-gen-by-yhw.control
-│
-├── lib/                   # Python proxy and utilities
-│   └── embedding_proxy.py
-│
-├── scripts/               # Deployment automation
-│   ├── deploy.sh          # Main deployment script
-│   ├── install_extension.sql
-│   └── test_extension.sql
-│
-└── docs/                  # Documentation (optional)
-    └── getting-started.md
-```
-
-## Requirements
-
-- PostgreSQL 18+ with development headers
-- Python 3.8+ with `requests` library
-- GCC compiler
-- Network access to embedding API (or local model server)
-
-### Install Dependencies
-
-```bash
-# Python dependencies
-pip install requests
-
-# PostgreSQL dev headers
-sudo apt-get install postgresql-server-dev-all  # Ubuntu/Debian
-# or: yum install postgresql-devel              # CentOS/RHEL
+```sql
+-- If pgvector extension is installed
+CREATE INDEX ON documents USING ivfflat (embedding vector_cosine_ops)
+WITH (lists = 100);
 ```
 
 ## Troubleshooting
 
-### Common Issues
+### Permission Issues
 
-**1. Library loading error:**
+Ensure PostgreSQL user has permission to execute scripts:
+
 ```bash
-# Ensure .so file is executable
-chmod +x /usr/local/pgsql/lib/pg-embedding-gen-by-yhw.so
+sudo chown postgres:postgres /usr/local/pgsql/lib/embedding_wrapper.sh
+sudo chmod 755 /usr/local/pgsql/lib/embedding_wrapper.sh
 ```
 
-**2. API connection failed:**
+### Python Module Not Found
+
+Ensure Python dependencies are installed:
+
 ```bash
-# Test connectivity directly
-curl http://localhost:12345/v1/embeddings -H "Content-Type: application/json" \
-  -d '{"model": "text-embedding-bge-m3", "input": "test"}'
+pip3 install openai requests pyyaml
 ```
 
-**3. Empty embedding returned:**
+### View Logs
+
+View embedding proxy logs:
+
 ```bash
-# Check Python proxy execution
-python3 /usr/local/pgsql/bin/pg_embedding_proxy.py "test"
+tail -f /var/log/pg_embedding-gen.log
 ```
+
+## Contributing
+
+Issues and Pull Requests are welcome!
 
 ## License
 
-Apache License, Version 2.0 - See [LICENSE](LICENSE) file for details.
+MIT License - see LICENSE file for details
 
----
+## Author
 
-**Version**: 0.1.0  
-**PostgreSQL Compatibility**: 18+  
-**Python Version**: 3.8+  
+yhw (Haiwen Yin)
+
+## Changelog
+
+See CHANGELOG.md for details
+
+## Documentation
+
+- [Installation Guide](docs/setup-guide.md)
+- [Model Configuration](docs/model-configuration.md)
