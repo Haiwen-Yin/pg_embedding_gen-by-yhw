@@ -1,26 +1,26 @@
 #!/bin/bash
 #
-# pg_embedding-gen 嵌入包装脚本
-# 版本: v0.2.0
-# 作者: yhw
+# pg_embedding-gen: Embedding wrapper script
+# Version: v1.0.0
+# Author: yhw (Haiwen Yin)
 #
-# 此脚本用于包装 embedding_proxy.py，确保在 PostgreSQL COPY FROM PROGRAM 中正确执行
+# Wraps embedding_proxy.py for safe execution in PostgreSQL COPY FROM PROGRAM.
+# Uses base64 encoding to avoid shell injection and special character issues.
+#
 
 set -euo pipefail
 
-# 脚本目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROXY_SCRIPT="${SCRIPT_DIR}/embedding_proxy.py"
+DEFAULT_CONFIG="/etc/pg_embedding-gen/config.json"
 
-# 默认配置文件
-DEFAULT_CONFIG="/etc/pg_embedding-gen/config.yaml"
-
-# 解析参数
 TEXT=""
 MODEL=""
+API_URL=""
 CONFIG=""
+LOG_FILE=""
+LOG_LEVEL=""
 
-# 解析命令行参数
 while [[ $# -gt 0 ]]; do
     case $1 in
         --text)
@@ -31,62 +31,64 @@ while [[ $# -gt 0 ]]; do
             MODEL="$2"
             shift 2
             ;;
-        --*)
-            # 假设是配置文件（以 -- 开头，但不是已知选项）
-            # PostgreSQL 可能会传递一些额外参数
-            CONFIG="${1#--}"
-            shift
+        --api-url)
+            API_URL="$2"
+            shift 2
+            ;;
+        --config)
+            CONFIG="$2"
+            shift 2
+            ;;
+        --log-file)
+            LOG_FILE="$2"
+            shift 2
+            ;;
+        --log-level)
+            LOG_LEVEL="$2"
+            shift 2
             ;;
         *)
-            # 位置参数，可能是配置文件
-            if [[ -f "$1" ]] && [[ "$1" == *.yaml ]]; then
-                CONFIG="$1"
-            fi
             shift
             ;;
     esac
 done
 
-# 使用默认配置（如果未指定）
-if [[ -z "$CONFIG" ]]; then
+if [[ -z "$TEXT" ]]; then
+    echo "Error: --text parameter required" >&2
+    exit 1
+fi
+
+if [[ ! -f "$PROXY_SCRIPT" ]]; then
+    echo "Error: proxy script not found: $PROXY_SCRIPT" >&2
+    exit 1
+fi
+
+if [[ -z "$CONFIG" ]] && [[ -f "$DEFAULT_CONFIG" ]]; then
     CONFIG="$DEFAULT_CONFIG"
 fi
 
-# 检查必需的参数
-if [[ -z "$TEXT" ]]; then
-    echo "错误: 缺少 --text 参数" >&2
-    exit 1
-fi
+TEXT_B64=$(printf '%s' "$TEXT" | base64 | tr -d '\n')
 
-# 检查文件存在
-if [[ ! -f "$PROXY_SCRIPT" ]]; then
-    echo "错误: 嵌入代理脚本不存在: $PROXY_SCRIPT" >&2
-    exit 1
-fi
-
-if [[ ! -f "$CONFIG" ]]; then
-    echo "错误: 配置文件不存在: $CONFIG" >&2
-    exit 1
-fi
-
-# 构建 Python 命令
-PYTHON_CMD=(python3 "$PROXY_SCRIPT" --text "$TEXT")
+CMD=(python3 "$PROXY_SCRIPT" --text-base64 "$TEXT_B64")
 
 if [[ -n "$MODEL" ]]; then
-    PYTHON_CMD+=(--model "$MODEL")
+    CMD+=(--model "$MODEL")
 fi
 
-PYTHON_CMD+=(--config "$CONFIG")
-
-# 执行并捕获输出
-# 使用子 shell 来处理输出，确保 flush
-OUTPUT=$("${PYTHON_CMD[@]}" 2>&1)
-EXIT_CODE=$?
-
-if [[ $EXIT_CODE -ne 0 ]]; then
-    echo "$OUTPUT" >&2
-    exit $EXIT_CODE
+if [[ -n "$API_URL" ]]; then
+    CMD+=(--api-url "$API_URL")
 fi
 
-# 输出结果
-echo "$OUTPUT"
+if [[ -n "$CONFIG" ]]; then
+    CMD+=(--config "$CONFIG")
+fi
+
+if [[ -n "$LOG_FILE" ]]; then
+    CMD+=(--log-file "$LOG_FILE")
+fi
+
+if [[ -n "$LOG_LEVEL" ]]; then
+    CMD+=(--log-level "$LOG_LEVEL")
+fi
+
+exec "${CMD[@]}"

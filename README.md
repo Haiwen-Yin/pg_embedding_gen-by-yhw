@@ -1,228 +1,189 @@
-# pg_embedding-gen - PostgreSQL Embedding Generation Extension
+# pg_embedding-gen
 
-A text vector embedding generation tool for PostgreSQL, implemented via COPY FROM PROGRAM mechanism without requiring compiled C extensions.
+A multi-model embedding generation extension for PostgreSQL 18+, generating text vector embeddings via SQL functions by calling any OpenAI-compatible `/v1/embeddings` API endpoint.
 
-## Version
-
-v0.2.0
+No C extension compilation required — uses PostgreSQL 18's `COPY FROM PROGRAM` mechanism.
 
 ## Features
 
-- ✅ No C extension compilation required, uses PostgreSQL 18's COPY FROM PROGRAM mechanism
-- ✅ Supports multiple embedding models (OpenAI, Ollama, local models, etc.)
-- ✅ Generate vectors directly via SQL functions
-- ✅ Flexible configuration, easy to deploy
-- ✅ Supports batch processing and asynchronous generation
-- ✅ Comprehensive error handling and logging
+- **Multi-model support** — Register and switch between embedding models via SQL
+- **Auto-detect dimensions** — Vector dimensions detected automatically on first use
+- **Flexible configuration** — API URL and model ID configurable per profile, inline, or via database config
+- **Any OpenAI-compatible API** — BGE-M3, OpenAI, Ollama, vLLM, Xinference, etc.
+- **Shell-safe** — Base64-encoded input prevents injection and encoding issues
+- **Retry with backoff** — Automatic retry on transient failures
+- **Health check & validation** — Built-in API connectivity testing and vector validation
+- **Similarity functions** — Cosine similarity and Euclidean distance
+- **Logging & statistics** — Request logging, stats, and error tracking
 
-## System Requirements
+## Requirements
 
-- PostgreSQL 18 or higher
-- Python 3.8 or higher
-- Required Python libraries (see requirements.txt)
+- PostgreSQL 18+
+- Python 3.6+
+- Python `requests` library
 
-## Installation
-
-### Quick Install
+## Quick Start
 
 ```bash
-# Extract the archive
-unzip pg-embedding-gen-by-yhw-v0.2.0.zip
-
-# Change directory
-cd pg-embedding-gen-by-yhw-v0.2.0/pg_embedding-gen
-
-# Run installation script
+# Install files
 sudo bash scripts/install.sh
-```
 
-### Manual Installation
-
-1. Copy files to PostgreSQL extension directory:
-```bash
-sudo cp lib/embedding_proxy.py /usr/local/pgsql/lib/
-sudo cp lib/embedding_wrapper.sh /usr/local/pgsql/lib/
-sudo chmod +x /usr/local/pgsql/lib/embedding_wrapper.sh
-```
-
-2. Install Python dependencies:
-```bash
-pip3 install -r requirements.txt
-```
-
-3. Configure config.yaml:
-```bash
-cp config.example.yaml /etc/pg_embedding-gen/config.yaml
-# Edit config file, set your embedding model parameters
-sudo vim /etc/pg_embedding-gen/config.yaml
-```
-
-4. Create database functions:
-```bash
+# Create database functions
 psql -d your_database -f sql/install.sql
+
+# Generate an embedding
+psql -d your_database -c "SELECT embedding_generate('Hello world');"
 ```
 
-## Usage Examples
+## Usage
 
-### Generate Embedding Vectors
+### Generate Embeddings
 
 ```sql
--- Single text generation
-SELECT embedding_generate('your text content');
+-- Default model profile
+SELECT embedding_generate('your text');
 
--- Use specified model
-SELECT embedding_generate('your text content', 'openai-text-embedding-3-small');
+-- Named model profile
+SELECT embedding_generate('your text', 'bge-m3');
 
--- Batch generation
-SELECT id, text, embedding_generate(text) as vector 
-FROM documents 
-WHERE embedding IS NULL;
+-- Inline model_id + api_url (no registration needed)
+SELECT embedding_generate_model(
+    'your text',
+    'text-embedding-bge-m3',
+    'http://10.10.10.1:12345/v1/embeddings'
+);
 ```
 
-### Update Vector Column in Table
+### Model Profile Management
 
 ```sql
--- Update existing table
-UPDATE documents 
+-- List registered models
+SELECT * FROM embedding_list_models();
+
+-- Register a new model
+SELECT embedding_register_model(
+    'openai-small',                         -- profile name
+    'https://api.openai.com/v1/embeddings', -- API URL
+    'text-embedding-3-small',               -- model ID
+    true,                                   -- set as default
+    'OpenAI small embedding model'          -- description
+);
+
+-- Test a model (auto-detects dimensions)
+SELECT * FROM embedding_test_model('openai-small');
+
+-- Auto-detect dimensions for all registered models
+SELECT * FROM embedding_detect_dimensions();
+
+-- Set default model
+SELECT embedding_set_default_model('openai-small');
+
+-- Drop a model profile
+SELECT embedding_drop_model('openai-small');
+```
+
+### Similarity
+
+```sql
+SELECT embedding_cosine_similarity(
+    embedding_generate('The cat sat on the mat'),
+    embedding_generate('A kitten was sitting on a rug')
+);
+```
+
+### Health Check
+
+```sql
+-- Check default model
+SELECT * FROM embedding_health_check();
+
+-- Check specific model
+SELECT * FROM embedding_health_check('bge-m3');
+```
+
+### Batch Generation
+
+```sql
+SELECT embedding_generate_batch(ARRAY['cat', 'dog', 'bird']);
+SELECT embedding_generate_batch(ARRAY['cat', 'dog'], 'bge-m3');
+```
+
+### Update Table Column
+
+```sql
+UPDATE documents
 SET embedding = embedding_generate(text)
 WHERE embedding IS NULL;
-
--- Use WHERE clause for batch update
-UPDATE documents 
-SET embedding = embedding_generate(text)
-WHERE id > 100 AND id <= 200;
 ```
 
-### Check Embedding Status
+## Three Call Modes
 
-```sql
--- View embedding statistics
-SELECT * FROM embedding_stats();
-
--- View recent errors
-SELECT * FROM embedding_errors() ORDER BY created_at DESC LIMIT 10;
-```
-
-## Configuration
-
-Configuration file located at `/etc/pg_embedding-gen/config.yaml`, supports the following options:
-
-```yaml
-# Default model
-default_model: "openai-text-embedding-3-small"
-
-# OpenAI configuration
-openai:
-  api_key: "your-api-key"
-  base_url: "https://api.openai.com/v1"
-  timeout: 30
-
-# Ollama configuration
-ollama:
-  base_url: "http://localhost:11434"
-  timeout: 60
-
-# General configuration
-batch_size: 100
-max_retries: 3
-log_level: "INFO"
-```
-
-For detailed configuration, see `docs/model-configuration.md`.
+| Mode | Function | Use When |
+|------|----------|----------|
+| Default profile | `embedding_generate(text)` | Simplest, uses default model |
+| Named profile | `embedding_generate(text, profile)` | Use a specific registered model |
+| Inline | `embedding_generate_model(text, model_id, api_url)` | One-off call, no registration |
 
 ## Supported Models
 
-- OpenAI: text-embedding-3-small, text-embedding-3-large
-- Ollama: nomic-embed-text, all-minilm, mxbai-embed-large
-- Local models: sentence-transformers, etc.
+Any OpenAI-compatible `/v1/embeddings` endpoint:
 
-For more model information, see `docs/model-configuration.md`.
-
-## Performance Optimization
-
-### Batch Processing
-
-Use batch updates for better performance:
-
-```sql
--- Batch update (1000 rows per batch)
-DO $$
-DECLARE
-  batch_size INT := 1000;
-  offset INT := 0;
-  updated INT;
-BEGIN
-  LOOP
-    UPDATE documents 
-    SET embedding = embedding_generate(text)
-    WHERE id > offset 
-      AND id <= offset + batch_size
-      AND embedding IS NULL;
-    
-    GET DIAGNOSTICS updated = ROW_COUNT;
-    
-    RAISE NOTICE 'Updated % rows from offset %', updated, offset;
-    
-    EXIT WHEN updated = 0;
-    offset := offset + batch_size;
-  END LOOP;
-END $$;
-```
-
-### Index Optimization
-
-Create indexes for vector columns:
-
-```sql
--- If pgvector extension is installed
-CREATE INDEX ON documents USING ivfflat (embedding vector_cosine_ops)
-WITH (lists = 100);
-```
+| Model | Dimensions | Endpoint |
+|-------|-----------|----------|
+| BGE-M3 | 1024 | vLLM / Xinference |
+| text-embedding-3-small | 1536 | OpenAI |
+| text-embedding-3-large | 3072 | OpenAI |
+| nomic-embed-text | 768 | Ollama |
+| mxbai-embed-large | 1024 | Ollama |
 
 ## Troubleshooting
 
-### Permission Issues
-
-Ensure PostgreSQL user has permission to execute scripts:
-
 ```bash
-sudo chown postgres:postgres /usr/local/pgsql/lib/embedding_wrapper.sh
-sudo chmod 755 /usr/local/pgsql/lib/embedding_wrapper.sh
+# Test proxy directly
+/usr/local/pgsql/lib/embedding_wrapper.sh --text 'Hello world'
+
+# Check Python dependency
+python3 -c "import requests; print(requests.__version__)"
 ```
 
-### Python Module Not Found
+## File Configuration (fallback)
 
-Ensure Python dependencies are installed:
+`/etc/pg_embedding-gen/config.json`:
 
-```bash
-pip3 install openai requests pyyaml
+```json
+{
+    "api_url": "http://10.10.10.1:12345/v1/embeddings",
+    "model": "text-embedding-bge-m3",
+    "timeout": 30,
+    "max_retries": 3,
+    "log_level": "WARNING",
+    "log_file": ""
+}
 ```
 
-### View Logs
+## Project Structure
 
-View embedding proxy logs:
-
-```bash
-tail -f /var/log/pg_embedding-gen.log
 ```
-
-## Contributing
-
-Issues and Pull Requests are welcome!
+pg_embedding-gen/
+├── lib/
+│   ├── embedding_proxy.py      # Python proxy calling the API
+│   └── embedding_wrapper.sh    # Shell wrapper for COPY FROM PROGRAM
+├── sql/
+│   └── install.sql             # SQL functions, tables, and management
+├── scripts/
+│   └── install.sh              # Installation script
+├── config.example.json         # Example configuration
+├── CHANGELOG.md
+├── LICENSE
+├── NOTICE
+├── README.md
+└── RELEASE_NOTES.md
+```
 
 ## License
 
-MIT License - see LICENSE file for details
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## Author
 
 yhw (Haiwen Yin)
-
-## Changelog
-
-See CHANGELOG.md for details
-
-## Documentation
-
-- [Installation Guide](docs/setup-guide.md)
-- [Model Configuration](docs/model-configuration.md)

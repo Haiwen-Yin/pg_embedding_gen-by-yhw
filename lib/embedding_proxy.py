@@ -1,180 +1,303 @@
 #!/usr/bin/env python3
 """
-pg_embedding-gen 嵌入代理
-版本: v0.2.0
-作者: yhw
+pg_embedding-gen: Embedding proxy for PostgreSQL
+Version: v1.0.0
+Author: yhw (Haiwen Yin)
 
-用于生成文本嵌入向量的 Python 代理脚本
-支持 OpenAI、Ollama 和本地模型
+Generates text embedding vectors by calling an OpenAI-compatible API.
+Supports base64-encoded input for safe passage through shell from PostgreSQL.
+Supports any OpenAI-compatible /v1/embeddings endpoint.
 """
 
 import sys
 import os
 import json
+import base64
 import argparse
-import yaml
+import time
 import logging
-from typing import List, Optional, Dict, Any
-from datetime import datetime
 
 try:
-    import openai
     import requests
-except ImportError as e:
-    sys.stderr.write(f"错误: 缺少必需的 Python 库: {e}\n")
-    sys.stderr.write("请运行: pip3 install openai requests pyyaml\n")
+except ImportError:
+    sys.stderr.write("Error: 'requests' library required.\n")
+    sys.stderr.write("Install: pip3 install requests\n")
     sys.exit(1)
 
+DEFAULT_API_URL = "http://10.10.10.1:12345/v1/embeddings"
+DEFAULT_MODEL = "text-embedding-bge-m3"
+DEFAULT_TIMEOUT = 30
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_DELAY = 1.0
+CONFIG_PATH = "/etc/pg_embedding-gen/config.json"
 
-class EmbeddingProxy:
-    """嵌入代理类"""
-    
-    def __init__(self, config_path: str):
-        """初始化代理"""
-        self.config = self._load_config(config_path)
-        self._setup_logging()
-        
-    def _load_config(self, config_path: str) -> Dict[str, Any]:
-        """加载配置文件"""
-        if not os.path.exists(config_path):
-            sys.stderr.write(f"错误: 配置文件不存在: {config_path}\n")
-            sys.exit(1)
-            
+logger = None
+
+
+def setup_logging(log_file=None, log_level="WARNING"):
+    global logger
+    logger = logging.getLogger("embedding_proxy")
+    level = getattr(logging, log_level.upper(), logging.WARNING)
+    logger.setLevel(level)
+
+    if logger.handlers:
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
+
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    handler_set = False
+    if log_file:
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return yaml.safe_load(f)
-        except Exception as e:
-            sys.stderr.write(f"错误: 加载配置文件失败: {e}\n")
-            sys.exit(1)
-    
-    def _setup_logging(self):
-        """设置日志"""
-        log_config = self.config.get('general', {})
-        log_level = getattr(logging, log_config.get('log_level', 'INFO'))
-        log_file = log_config.get('log_file', '/var/log/pg_embedding-gen.log')
-        
-        # 设置格式
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
-        # 文件处理器
+            fh = logging.FileHandler(log_file)
+            fh.setLevel(level)
+            fh.setFormatter(formatter)
+            logger.addHandler(fh)
+            handler_set = True
+        except (IOError, OSError):
+            pass
+
+    if not handler_set:
+        sh = logging.StreamHandler(sys.stderr)
+        sh.setLevel(level)
+        sh.setFormatter(formatter)
+        logger.addHandler(sh)
+
+
+def load_config(config_path):
+    if not os.path.exists(config_path):
+        return {}
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except (IOError, ValueError, OSError):
+        return {}
+
+
+def call_embedding_api(texts, api_url, model, timeout, max_retries):
+    payload = {
+        "model": model,
+        "input": texts,
+        "encoding_format": "float"
+    }
+
+    last_error = None
+    for attempt in range(max_retries):
         try:
-            file_handler = logging.FileHandler(log_file)
-            file_handler.setLevel(log_level)
-            file_handler.setFormatter(formatter)
-            
-            self.logger = logging.getLogger('embedding_proxy')
-            self.logger.setLevel(log_level)
-            self.logger.addHandler(file_handler)
+            resp = requests.post(api_url, json=payload, timeout=timeout)
+            resp.raise_for_status()
+            data = resp.json()
+
+            if "data" not in data or not isinstance(data["data"], list):
+                raise ValueError("Unexpected API response: missing 'data' array")
+
+            if len(data["data"]) == 0:
+                raise ValueError("Unexpected API response: empty 'data' array")
+
+            results = []
+            for item in data["data"]:
+                emb = item.get("embedding")
+                if not emb or not isinstance(emb, list):
+                    raise ValueError("Unexpected API response: missing 'embedding' field")
+                results.append(emb)
+
+            if len(results) != len(texts):
+                raise ValueError(
+                    "Response count mismatch: sent {}, got {}".format(
+                        len(texts), len(results)
+                    )
+                )
+
+            return results
+
+        except requests.exceptions.Timeout as e:
+            last_error = e
+            if logger:
+                logger.warning("Attempt %d/%d timed out", attempt + 1, max_retries)
+        except requests.exceptions.ConnectionError as e:
+            last_error = e
+            if logger:
+                logger.warning(
+                    "Attempt %d/%d connection error: %s",
+                    attempt + 1, max_retries, str(e)[:200]
+                )
+        except requests.exceptions.HTTPError as e:
+            last_error = e
+            if logger:
+                logger.warning(
+                    "Attempt %d/%d HTTP error: %s",
+                    attempt + 1, max_retries, str(e)[:200]
+                )
+            if resp.status_code is not None and 400 <= resp.status_code < 500:
+                break
+        except (ValueError, KeyError) as e:
+            last_error = e
+            if logger:
+                logger.warning(
+                    "Attempt %d/%d parse error: %s",
+                    attempt + 1, max_retries, str(e)
+                )
+            break
         except Exception as e:
-            # 如果无法写入日志文件，使用 stderr
-            self.logger = logging.getLogger('embedding_proxy')
-            self.logger.setLevel(log_level)
-            handler = logging.StreamHandler(sys.stderr)
-            handler.setLevel(log_level)
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
-    
-    def generate(self, text: str, model: Optional[str] = None) -> List[float]:
-        """生成嵌入向量"""
-        if not model:
-            model = self.config.get('default_model', 'openai-text-embedding-3-small')
-        
-        self.logger.info(f"生成嵌入: model={model}, text_length={len(text)}")
-        
+            last_error = e
+            if logger:
+                logger.warning(
+                    "Attempt %d/%d error: %s",
+                    attempt + 1, max_retries, str(e)[:200]
+                )
+
+        if attempt < max_retries - 1:
+            delay = DEFAULT_RETRY_DELAY * (2 ** attempt)
+            if logger:
+                logger.info("Retrying in %.1f seconds", delay)
+            time.sleep(delay)
+
+    raise RuntimeError(
+        "Embedding generation failed after {} attempt(s): {}".format(
+            max_retries, last_error
+        )
+    )
+
+
+def generate_embeddings(texts, api_url, model, timeout, max_retries):
+    if len(texts) == 0:
+        return []
+
+    if len(texts) == 1:
+        return call_embedding_api(texts, api_url, model, timeout, max_retries)
+
+    try:
+        results = call_embedding_api(texts, api_url, model, timeout, max_retries)
+        if len(results) == len(texts):
+            return results
+    except Exception:
+        pass
+
+    if logger:
+        logger.info("Batch API failed, falling back to individual requests")
+
+    results = []
+    last_err = None
+    for t in texts:
         try:
-            if model.startswith('openai'):
-                return self._generate_openai(text, model)
-            elif model.startswith('ollama'):
-                return self._generate_ollama(text, model)
-            else:
-                return self._generate_local(text, model)
+            r = call_embedding_api([t], api_url, model, timeout, max_retries)
+            results.extend(r)
         except Exception as e:
-            self.logger.error(f"生成嵌入失败: {e}")
-            raise
-    
-    def _generate_openai(self, text: str, model: str) -> List[float]:
-        """使用 OpenAI 生成嵌入"""
-        openai_config = self.config.get('openai', {})
-        api_key = openai_config.get('api_key', '')
-        base_url = openai_config.get('base_url', 'https://api.openai.com/v1')
-        timeout = openai_config.get('timeout', 30)
-        
-        if not api_key:
-            raise ValueError("OpenAI API key 未配置")
-        
-        client = openai.OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout
+            last_err = e
+            results.append(None)
+
+    if all(r is None for r in results):
+        raise RuntimeError(
+            "All individual requests failed: {}".format(last_err)
         )
-        
-        response = client.embeddings.create(
-            model=model.replace('openai-', ''),
-            input=text
-        )
-        
-        return response.data[0].embedding
-    
-    def _generate_ollama(self, text: str, model: str) -> List[float]:
-        """使用 Ollama 生成嵌入"""
-        ollama_config = self.config.get('ollama', {})
-        base_url = ollama_config.get('base_url', 'http://localhost:11434')
-        timeout = ollama_config.get('timeout', 60)
-        
-        url = f"{base_url}/api/embeddings"
-        payload = {
-            "model": model.replace('ollama-', ''),
-            "prompt": text
-        }
-        
-        response = requests.post(url, json=payload, timeout=timeout)
-        response.raise_for_status()
-        
-        data = response.json()
-        return data.get('embedding', [])
-    
-    def _generate_local(self, text: str, model: str) -> List[float]:
-        """使用本地模型生成嵌入"""
-        # 这里可以集成 sentence-transformers 或其他本地模型
-        # 为简化，目前返回一个示例向量
-        sys.stderr.write(f"警告: 本地模型支持尚未完全实现: {model}\n")
-        
-        # 返回一个模拟向量（实际应该使用真正的模型）
-        return [0.0] * 768
+
+    return results
 
 
 def main():
-    """主函数"""
-    parser = argparse.ArgumentParser(description='pg_embedding-gen 嵌入代理')
-    parser.add_argument('--text', required=True, help='要生成嵌入的文本')
-    parser.add_argument('--model', help='嵌入模型名称')
-    parser.add_argument('--config', help='配置文件路径')
-    
-    # 兼容 PostgreSQL COPY FROM PROGRAM 的参数格式
-    parser.add_argument('config_pos', nargs='?', help='配置文件路径（位置参数）')
-    
+    parser = argparse.ArgumentParser(
+        description='pg_embedding-gen embedding proxy v1.0.0'
+    )
+
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument('--text', help='Single text to embed (plain text)')
+    input_group.add_argument(
+        '--text-base64',
+        help='Single text to embed (base64 encoded, preferred for shell safety)'
+    )
+    input_group.add_argument(
+        '--batch-base64',
+        help='JSON array of texts (base64 encoded, for batch processing)'
+    )
+
+    parser.add_argument(
+        '--model', default=None,
+        help='Model ID sent to API (default: {})'.format(DEFAULT_MODEL)
+    )
+    parser.add_argument(
+        '--api-url', default=None,
+        help='API endpoint URL (default: {})'.format(DEFAULT_API_URL)
+    )
+    parser.add_argument(
+        '--timeout', type=int, default=None,
+        help='Request timeout in seconds'
+    )
+    parser.add_argument(
+        '--max-retries', type=int, default=None,
+        help='Maximum retry attempts'
+    )
+    parser.add_argument('--config', default=None, help='Config file path (JSON)')
+
+    parser.add_argument(
+        '--log-file', default=None,
+        help='Log file path (default: stderr only)'
+    )
+    parser.add_argument(
+        '--log-level', default='WARNING',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        help='Log level (default: WARNING)'
+    )
+
     args = parser.parse_args()
-    
-    # 确定配置文件路径
-    config_path = args.config or args.config_pos
-    if not config_path:
-        config_path = '/etc/pg_embedding-gen/config.yaml'
-    
-    # 创建代理
-    proxy = EmbeddingProxy(config_path)
-    
-    # 生成嵌入
+
+    setup_logging(args.log_file, args.log_level)
+
+    config = {}
+    if args.config:
+        config = load_config(args.config)
+    elif os.path.exists(CONFIG_PATH):
+        config = load_config(CONFIG_PATH)
+
+    api_url = args.api_url or config.get('api_url', DEFAULT_API_URL)
+    model = args.model or config.get('model', DEFAULT_MODEL)
+    timeout = args.timeout or config.get('timeout', DEFAULT_TIMEOUT)
+    max_retries = args.max_retries or config.get('max_retries', DEFAULT_MAX_RETRIES)
+
+    if logger:
+        logger.debug(
+            "Config: api_url=%s model=%s timeout=%d retries=%d",
+            api_url, model, timeout, max_retries
+        )
+
+    if args.text:
+        texts = [args.text]
+    elif args.text_base64:
+        try:
+            decoded = base64.b64decode(args.text_base64)
+            texts = [decoded.decode('utf-8')]
+        except Exception as e:
+            sys.stderr.write("Error: base64 decode failed: {}\n".format(e))
+            sys.exit(1)
+    elif args.batch_base64:
+        try:
+            decoded = base64.b64decode(args.batch_base64)
+            texts = json.loads(decoded.decode('utf-8'))
+            if not isinstance(texts, list):
+                raise ValueError("Batch input must be a JSON array")
+            if len(texts) == 0:
+                raise ValueError("Batch input array is empty")
+        except Exception as e:
+            sys.stderr.write(
+                "Error: batch base64 decode failed: {}\n".format(e)
+            )
+            sys.exit(1)
+    else:
+        sys.stderr.write("Error: no input provided\n")
+        sys.exit(1)
+
     try:
-        embedding = proxy.generate(args.text, args.model)
-        
-        # 输出向量（逗号分隔）
-        output = ','.join(map(str, embedding))
-        print(output, flush=True)
-        
+        results = generate_embeddings(texts, api_url, model, timeout, max_retries)
+
+        for i, embedding in enumerate(results):
+            if embedding is None:
+                print("ERROR", flush=True)
+            else:
+                print(','.join(map(str, embedding)), flush=True)
+
     except Exception as e:
-        sys.stderr.write(f"错误: {e}\n")
+        sys.stderr.write("Error: {}\n".format(e))
         sys.exit(1)
 
 

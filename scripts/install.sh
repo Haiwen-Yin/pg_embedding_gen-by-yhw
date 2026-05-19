@@ -1,111 +1,119 @@
 #!/bin/bash
-# pg_embedding-gen 安装脚本
+# pg_embedding-gen installation script
+# Version: v1.0.0
+# Author: yhw (Haiwen Yin)
 
-set -e
+set -euo pipefail
 
-VERSION="v0.2.0"
-AUTHOR="yhw"
+VERSION="v1.0.0"
 INSTALL_DIR="/usr/local/pgsql/lib"
 CONFIG_DIR="/etc/pg_embedding-gen"
-LOG_DIR="/var/log"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 
 echo "========================================"
-echo "pg_embedding-gen 安装脚本"
-echo "版本: $VERSION"
-echo "作者: $AUTHOR"
+echo "pg_embedding-gen Installer ${VERSION}"
 echo "========================================"
 
-# 检查是否为 root 用户
-if [ "$EUID" -ne 0 ]; then
-    echo "错误：请使用 root 权限运行此脚本"
-    echo "使用: sudo bash scripts/install.sh"
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Error: root privileges required. Run: sudo bash scripts/install.sh"
     exit 1
 fi
 
-# 检查 PostgreSQL 版本
-if ! command -v psql &> /dev/null; then
-    echo "错误：未找到 PostgreSQL，请先安装 PostgreSQL 18 或更高版本"
-    exit 1
-fi
+PG_BIN=""
+for candidate in /usr/local/pgsql/bin/pg_config; do
+    if [ -x "$candidate" ]; then
+        PG_BIN="$candidate"
+        break
+    fi
+done
 
-PG_VERSION=$(psql --version | awk '{print $3}' | cut -d. -f1)
-if [ "$PG_VERSION" -lt 18 ]; then
-    echo "警告：检测到 PostgreSQL $PG_VERSION，推荐使用 PostgreSQL 18 或更高版本"
-    echo "按 Ctrl+C 取消，或继续安装（可能无法正常工作）"
-    read -r -p "继续安装？(y/N): " confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+if [ -z "$PG_BIN" ]; then
+    if command -v pg_config >/dev/null 2>&1; then
+        PG_BIN="$(command -v pg_config)"
+    else
+        echo "Error: pg_config not found. Ensure PostgreSQL 18+ is installed."
         exit 1
     fi
 fi
 
-# 检查 Python 版本
-if ! command -v python3 &> /dev/null; then
-    echo "错误：未找到 Python 3，请先安装 Python 3.8 或更高版本"
+PG_VERSION=$("$PG_BIN" --version | awk '{print $2}' | cut -d. -f1)
+if [ "$PG_VERSION" -lt 18 ]; then
+    echo "Error: PostgreSQL ${PG_VERSION} detected. Version 18+ required."
     exit 1
 fi
 
-PY_VERSION=$(python3 --version | awk '{print $2}' | cut -d. -f1-2)
-echo "检测到 Python $PY_VERSION"
+echo "PostgreSQL version: $("$PG_BIN" --version)"
 
-# 创建安装目录
-echo "创建安装目录..."
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "Error: python3 not found. Python 3.6+ required."
+    exit 1
+fi
+
+PY_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
+echo "Python version: ${PY_VERSION}"
+
+echo ""
+echo "Installing files..."
+
 mkdir -p "$INSTALL_DIR"
-mkdir -p "$CONFIG_DIR"
-mkdir -p "$LOG_DIR"
-
-# 复制文件
-echo "复制文件..."
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
-cp "$SCRIPT_DIR/lib/embedding_proxy.py" "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/lib/embedding_wrapper.sh" "$INSTALL_DIR/"
-
-# 设置权限
-echo "设置文件权限..."
+cp "${SCRIPT_DIR}/lib/embedding_proxy.py" "$INSTALL_DIR/"
+cp "${SCRIPT_DIR}/lib/embedding_wrapper.sh" "$INSTALL_DIR/"
 chmod 644 "$INSTALL_DIR/embedding_proxy.py"
 chmod 755 "$INSTALL_DIR/embedding_wrapper.sh"
-chown postgres:postgres "$INSTALL_DIR/embedding_wrapper.sh" || true
 
-# 复制配置文件
-if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
-    cp "$SCRIPT_DIR/config.example.yaml" "$CONFIG_DIR/config.yaml"
-    echo "已创建默认配置文件: $CONFIG_DIR/config.yaml"
-    echo "请编辑此文件以配置你的嵌入模型"
+echo "  Installed: ${INSTALL_DIR}/embedding_proxy.py"
+echo "  Installed: ${INSTALL_DIR}/embedding_wrapper.sh"
+
+echo ""
+echo "Installing Python dependencies..."
+if python3 -c 'import requests' 2>/dev/null; then
+    echo "  requests: already installed"
 else
-    echo "配置文件已存在，跳过: $CONFIG_DIR/config.yaml"
+    if command -v pip3 >/dev/null 2>&1; then
+        pip3 install -q requests || echo "  Warning: pip3 install failed, install manually: pip3 install requests"
+    else
+        echo "  Warning: pip3 not found. Install manually: pip3 install requests"
+    fi
 fi
 
-# 安装 Python 依赖
-echo "安装 Python 依赖..."
-if command -v pip3 &> /dev/null; then
-    pip3 install -q openai requests pyyaml || {
-        echo "警告：pip3 安装失败，请手动安装依赖"
-        echo "运行: pip3 install openai requests pyyaml"
-    }
+echo ""
+echo "Setting up configuration..."
+mkdir -p "$CONFIG_DIR"
+
+if [ ! -f "${CONFIG_DIR}/config.json" ]; then
+    cp "${SCRIPT_DIR}/config.example.json" "${CONFIG_DIR}/config.json"
+    echo "  Created: ${CONFIG_DIR}/config.json"
 else
-    echo "警告：未找到 pip3，请手动安装 Python 依赖"
-    echo "运行: pip3 install openai requests pyyaml"
+    echo "  Config already exists: ${CONFIG_DIR}/config.json (not overwritten)"
 fi
 
-# 创建日志文件
-touch "$LOG_DIR/pg_embedding-gen.log"
-chmod 644 "$LOG_DIR/pg_embedding-gen.log"
-chown postgres:postgres "$LOG_DIR/pg_embedding-gen.log" || true
+LOG_FILE="/var/log/pg_embedding-gen.log"
+touch "$LOG_FILE" 2>/dev/null || true
+chmod 644 "$LOG_FILE" 2>/dev/null || true
+
+PG_OWNER=$("$PG_BIN" --user 2>/dev/null || echo "postgres")
+chown "${PG_OWNER}:${PG_OWNER}" "$INSTALL_DIR/embedding_wrapper.sh" 2>/dev/null || true
+chown "${PG_OWNER}:${PG_OWNER}" "$LOG_FILE" 2>/dev/null || true
 
 echo ""
 echo "========================================"
-echo "安装完成！"
+echo "Installation complete!"
 echo "========================================"
 echo ""
-echo "后续步骤："
+echo "Next steps:"
 echo ""
-echo "1. 编辑配置文件:"
-echo "   sudo vim $CONFIG_DIR/config.yaml"
+echo "1. Verify the proxy works:"
+echo "   /usr/local/pgsql/lib/embedding_wrapper.sh --text 'Hello world'"
 echo ""
-echo "2. 在数据库中创建函数:"
-echo "   psql -d your_database -f $SCRIPT_DIR/sql/install.sql"
+echo "2. Create database functions:"
+echo "   psql -d YOUR_DB -f ${SCRIPT_DIR}/sql/install.sql"
 echo ""
-echo "3. 测试安装:"
-echo "   SELECT embedding_generate('测试文本');"
+echo "3. Test:"
+echo "   psql -d YOUR_DB -c \"SELECT * FROM embedding_health_check();\""
 echo ""
-echo "更多信息请参考 README.md"
+echo "4. Register your models (optional):"
+echo "   psql -d YOUR_DB -c \"SELECT embedding_register_model('my-model', 'http://api/v1/embeddings', 'model-id', true);\""
+echo ""
+echo "5. Auto-detect dimensions:"
+echo "   psql -d YOUR_DB -c \"SELECT * FROM embedding_detect_dimensions();\""
 echo ""

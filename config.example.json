@@ -1,0 +1,8 @@
+{
+    "api_url": "http://10.10.10.1:12345/v1/embeddings",
+    "model": "text-embedding-bge-m3",
+    "timeout": 30,
+    "max_retries": 3,
+    "log_level": "WARNING",
+    "log_file": ""
+}
